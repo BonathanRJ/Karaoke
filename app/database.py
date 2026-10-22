@@ -1,6 +1,6 @@
-from pathlib import Path
+import re
 import sqlite3
-import shutil
+from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / 'data'
@@ -66,101 +66,18 @@ def init_db():
         _ensure_column(conn, 'songs', 'vocals_path', 'TEXT')
         _ensure_column(conn, 'songs', 'source_url', 'TEXT')
         _ensure_column(conn, 'songs', 'prepared_automatically', 'INTEGER NOT NULL DEFAULT 0')
+        _ensure_column(conn, 'songs', 'album', "TEXT NOT NULL DEFAULT ''")
         conn.commit()
 
     synchronize_library()
 
 
-def _file_name(path):
-    return str(path).replace('\\', '/').rsplit('/', 1)[-1]
-
-
-def _destination_for(path, field):
-    name = Path(path).name
-    if field == 'lyrics_path' or Path(name).suffix.lower() == '.lrc':
-        return LYRIC_DIR / name
-    if field == 'vocals_path' or '[Vocals]' in name:
-        return VOCAL_DIR / name
-    if field == 'audio_path' and '[Instrumental]' in name:
-        return INSTRUMENTAL_DIR / name
-    if '[Instrumental]' in name:
-        return INSTRUMENTAL_DIR / name
-    return ORIGINAL_DIR / name
-
-
-def migrate_music_paths():
-    """Move legacy root-level files and update database paths without losing existing files."""
+def update_song_metadata(song_id, title, artist, album=''):
     with connect() as conn:
-        songs = conn.execute('SELECT id, audio_path, source_audio_path, vocals_path, lyrics_path FROM songs').fetchall()
-        for song in songs:
-            updates = {}
-            for field in ('audio_path', 'source_audio_path', 'vocals_path', 'lyrics_path'):
-                value = song[field]
-                if not value:
-                    continue
-                old = Path(value)
-                candidate = old if old.exists() else MUSIC_DIR / _file_name(value)
-                if not candidate.exists():
-                    for folder in (ORIGINAL_DIR, INSTRUMENTAL_DIR, VOCAL_DIR, LYRIC_DIR):
-                        match = folder / _file_name(value)
-                        if match.exists():
-                            updates[field] = str(match.resolve())
-                            break
-                    continue
-                if candidate.resolve().parent != MUSIC_DIR.resolve():
-                    continue
-                destination = _destination_for(candidate, field)
-                if destination.exists() and destination.resolve() != candidate.resolve():
-                    # Never overwrite different user files.
-                    if destination.read_bytes() != candidate.read_bytes():
-                        count = 1
-                        while destination.exists():
-                            destination = destination.with_name(f'{destination.stem}_{count}{destination.suffix}')
-                            count += 1
-                    else:
-                        candidate.unlink()
-                if candidate.exists():
-                    shutil.move(str(candidate), str(destination))
-                updates[field] = str(destination.resolve())
-            if updates:
-                fields = ', '.join(f'{field} = ?' for field in updates)
-                conn.execute(f'UPDATE songs SET {fields} WHERE id = ?', (*updates.values(), song['id']))
-        conn.commit()
-
-    # Legacy files not present in the database (including standalone LRC files).
-    for old in MUSIC_DIR.iterdir():
-        if not old.is_file():
-            continue
-        folder = _destination_for(old, 'audio_path')
-        destination = folder
-        if destination.exists():
-            continue
-        shutil.move(str(old), str(destination))
-
-
-def repair_shared_paths():
-    with connect() as conn:
-        songs = conn.execute('SELECT id, audio_path, lyrics_path, source_audio_path, vocals_path FROM songs').fetchall()
-        for song in songs:
-            updates = {}
-            for field in ('audio_path', 'lyrics_path', 'source_audio_path', 'vocals_path'):
-                value = song[field]
-                if not value or Path(value).exists():
-                    continue
-                for folder in (ORIGINAL_DIR, INSTRUMENTAL_DIR, VOCAL_DIR, LYRIC_DIR, MUSIC_DIR):
-                    candidate = folder / _file_name(value)
-                    if candidate.exists():
-                        updates[field] = str(candidate.resolve())
-                        break
-            if updates:
-                fields = ', '.join(f'{field} = ?' for field in updates)
-                conn.execute(f'UPDATE songs SET {fields} WHERE id = ?', (*updates.values(), song['id']))
-        conn.commit()
-
-
-def update_song_metadata(song_id, title, artist):
-    with connect() as conn:
-        conn.execute('UPDATE songs SET title = ?, artist = ? WHERE id = ?', (title.strip(), artist.strip(), song_id))
+        conn.execute(
+            'UPDATE songs SET title = ?, artist = ?, album = ? WHERE id = ?',
+            (title.strip(), artist.strip(), (album or '').strip(), song_id),
+        )
         conn.commit()
 
 
@@ -173,13 +90,15 @@ def add_song(
     vocals_path='',
     source_url='',
     prepared_automatically=False,
+    album='',
 ):
     with connect() as conn:
         cur = conn.execute(
             '''
             INSERT INTO songs
-                (title, artist, audio_path, lyrics_path, source_audio_path, vocals_path, source_url, prepared_automatically)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (title, artist, audio_path, lyrics_path, source_audio_path, vocals_path, source_url,
+                 prepared_automatically, album)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 title,
@@ -190,6 +109,7 @@ def add_song(
                 str(vocals_path) if vocals_path else None,
                 str(source_url) if source_url else None,
                 1 if prepared_automatically else 0,
+                (album or '').strip(),
             ),
         )
         _allocate_song_codes(conn)
@@ -235,33 +155,12 @@ def mark_song_synced(song_id, lyrics_path):
         )
         conn.commit()
 
-def update_song_preparation(song_id, instrumental_path, vocals_path, lyrics_path, source_audio_path=None):
-    with connect() as conn:
-        conn.execute(
-            '''
-            UPDATE songs
-            SET audio_path = ?, vocals_path = ?, lyrics_path = ?,
-                source_audio_path = COALESCE(?, source_audio_path, audio_path),
-                prepared_automatically = 1
-            WHERE id = ?
-            ''',
-            (
-                str(instrumental_path),
-                str(vocals_path) if vocals_path else None,
-                str(lyrics_path) if lyrics_path else None,
-                str(source_audio_path) if source_audio_path else None,
-                song_id,
-            ),
-        )
-        conn.commit()
-
 
 AUDIO_EXTENSIONS = {'.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac'}
 
 
 def _identity(path):
     """Associates stems without changing on-disk filenames."""
-    import re
     name = Path(str(path).replace('\\', '/')).stem
     name = re.sub(r'\s*\[(?:instrumental|vocals|vocal)\]\s*$', '', name, flags=re.I)
     return name.strip().casefold()
@@ -323,14 +222,12 @@ def synchronize_library():
         conn.commit()
 
 
-def list_songs(search=''):
-    """Only tracks with both files in their dedicated folders appear."""
+def list_songs():
+    """Somente músicas com instrumental e letra nas pastas próprias aparecem."""
     with connect() as conn:
-        _allocate_song_codes(conn)
         songs = conn.execute('SELECT * FROM songs ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE, id').fetchall()
     instrumental_root = INSTRUMENTAL_DIR.resolve()
     lyric_root = LYRIC_DIR.resolve()
-    query = search.strip().casefold()
     result = []
     for song in songs:
         audio = Path(song['audio_path']).resolve() if song['audio_path'] else None
@@ -339,10 +236,14 @@ def list_songs(search=''):
             continue
         if audio.parent != instrumental_root or lyric.parent != lyric_root:
             continue
-        if query and query not in song['title'].casefold() and query not in (song['artist'] or '').casefold() and query not in (song['code'] or ''):
-            continue
         result.append(song)
     return result
+
+
+def get_song(song_id):
+    with connect() as conn:
+        row = conn.execute('SELECT * FROM songs WHERE id = ?', (song_id,)).fetchone()
+    return dict(row) if row else None
 
 
 def get_song_by_audio_path(audio_path):
@@ -352,10 +253,3 @@ def get_song_by_audio_path(audio_path):
             'SELECT * FROM songs WHERE audio_path = ? OR source_audio_path = ?',
             (target, target),
         ).fetchone()
-
-
-def delete_song(song_id):
-    """Remove somente o cadastro; nunca exclui arquivos de áudio, vocal ou letra."""
-    with connect() as conn:
-        conn.execute('DELETE FROM songs WHERE id = ?', (song_id,))
-        conn.commit()

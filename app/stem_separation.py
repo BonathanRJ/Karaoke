@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import re
 import shutil
@@ -45,13 +46,12 @@ def separate_vocals_and_instrumental(audio_path, work_dir, final_dir=None, model
     if not audio_path.exists():
         raise RuntimeError(f'Arquivo de áudio não encontrado: {audio_path}')
 
-    try:
-        import demucs  # noqa: F401
-    except ImportError as error:
+    # Só confere se o Demucs está instalado; ele roda em outro processo.
+    if importlib.util.find_spec('demucs') is None:
         raise RuntimeError(
             "A separação automática precisa do pacote 'demucs'. "
             "Instale as dependências novamente com: python -m pip install -r requirements.txt"
-        ) from error
+        )
 
     command = [
         sys.executable,

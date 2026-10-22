@@ -1,0 +1,7 @@
+PySide6>=6.8,<7
+faster-whisper>=1.1,<2
+av>=11,<19
+yt-dlp>=2024.8.6,<2027
+demucs>=4,<5
+syncedlyrics>=1.0.1,<2
+lyricsgenius>=3.15,<4

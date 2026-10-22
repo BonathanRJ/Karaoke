@@ -119,13 +119,3 @@ def parse_editor_lines(text):
                 "words": words,
             })
     return result
-
-
-def active_index(lines, position_ms):
-    index = -1
-    for i, item in enumerate(lines):
-        if item["time"] <= position_ms:
-            index = i
-        else:
-            break
-    return index

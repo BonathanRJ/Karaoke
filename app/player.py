@@ -57,8 +57,11 @@ class Player(QObject):
         self.media.stop()
         self.media.setPosition(0)
 
+    def is_playing(self):
+        return self.media.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+
     def toggle(self):
-        if self.media.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+        if self.is_playing():
             self.pause()
         else:
             self.play()
